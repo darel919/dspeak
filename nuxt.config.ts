@@ -1,26 +1,28 @@
 import tailwindcss from "@tailwindcss/vite";
-import { mkdirSync, cpSync, existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import packageMetadata from "./package.json" with { type: "json" };
 
 const isProduction = process.env.NODE_ENV === "production";
+const isDesktop = process.env.DSPEAK_DESKTOP === "1";
+const desktopApiBasePath = process.env.VITE_DSPEAK_API_PATH || "";
 
-function copyWsModule(nitro) {
-  if (nitro.options.dev) return;
-
-  const src = resolve("node_modules/ws");
-  const dest = resolve(nitro.options.output.serverDir, "node_modules/ws");
-  if (!existsSync(dest) && existsSync(src)) {
-    mkdirSync(dirname(dest), { recursive: true });
-    cpSync(src, dest, { recursive: true, force: true });
-    console.log("[nitro] Copied ws module to output");
-  }
-}
+const connectSources = [process.env.MEDIA_CONTROL_URL, process.env.SUPABASE_URL]
+  .filter(Boolean)
+  .flatMap((value) => {
+    try {
+      const url = new URL(value);
+      const websocketProtocol = url.protocol === "https:" ? "wss:" : "ws:";
+      return [url.origin, `${websocketProtocol}//${url.host}`];
+    } catch {
+      return [];
+    }
+  });
 
 export default defineNuxtConfig({
-  ssr: true,
+  ssr: !isDesktop,
   compatibilityDate: "2025-07-15",
-  devtools: { enabled: !isProduction },
+  devtools: { enabled: !isProduction && !isDesktop },
+  dir: isDesktop ? { public: resolve("desktop/public") } : undefined,
   app: {
     head: {
       htmlAttrs: {
@@ -39,7 +41,9 @@ export default defineNuxtConfig({
   },
 
   css: ["~/assets/app.css"],
-  modules: ["@pinia/nuxt", "@vite-pwa/nuxt", "@nuxt/icon", "nuxt-security"],
+  modules: isDesktop
+    ? ["@pinia/nuxt", "@nuxt/icon"]
+    : ["@pinia/nuxt", "@vite-pwa/nuxt", "@nuxt/icon", "nuxt-security"],
 
   security: {
     strict: true,
@@ -51,7 +55,7 @@ export default defineNuxtConfig({
         ? {
             "default-src": ["'self'"],
             "base-uri": ["'none'"],
-            "connect-src": ["'self'"],
+            "connect-src": ["'self'", ...connectSources],
             "font-src": ["'self'", "data:"],
             "form-action": ["'self'"],
             "frame-ancestors": ["'none'"],
@@ -147,104 +151,70 @@ export default defineNuxtConfig({
     sourceMap: false,
     externals: {
       inline: [resolve("shared")],
-      traceInclude: [
-        resolve("node_modules/mediasoup/worker/out/Release/mediasoup-worker"),
-      ],
     },
-    experimental: {
-      websocket: true,
-    },
-    hooks: {
-      compiled: (nitro) => {
-        copyWsModule(nitro);
+  },
+
+  pwa: isDesktop
+    ? false
+    : {
+        strategies: "injectManifest",
+        srcDir: "../public",
+        filename: "sw.js",
+        registerType: "prompt",
+        injectRegister: false,
+        injectManifest: {
+          globPatterns: ["**/*.{js,css,json,png,svg,ico,woff,woff2}"],
+          rollupFormat: "es",
+        },
+        client: {
+          registerPlugin: false,
+        },
+
+        manifest: {
+          id: "/",
+          name: "dSpeak",
+          short_name: "dSpeak",
+          description: "DWS communication app.",
+          start_url: "/",
+          scope: "/",
+          theme_color: "#4A90E2",
+          background_color: "#FFFFFF",
+          display: "standalone",
+          orientation: "portrait",
+          icons: [
+            {
+              src: "/android-chrome-192x192.png",
+              sizes: "192x192",
+              type: "image/png",
+            },
+            {
+              src: "/android-chrome-512x512.png",
+              sizes: "512x512",
+              type: "image/png",
+            },
+          ],
+        },
+        devOptions: {
+          enabled: true,
+          type: "module",
+        },
       },
-    },
-  },
-
-  pwa: {
-    strategies: "injectManifest",
-    srcDir: "../public",
-    filename: "sw.js",
-    registerType: "prompt",
-    injectRegister: false,
-    injectManifest: {
-      globPatterns: ["**/*.{js,css,json,png,svg,ico,woff,woff2}"],
-      rollupFormat: "es",
-    },
-    client: {
-      registerPlugin: false,
-    },
-
-    manifest: {
-      id: "/",
-      name: "dSpeak",
-      short_name: "dSpeak",
-      description: "DWS communication app.",
-      start_url: "/",
-      scope: "/",
-      theme_color: "#4A90E2",
-      background_color: "#FFFFFF",
-      display: "standalone",
-      orientation: "portrait",
-      icons: [
-        {
-          src: "/android-chrome-192x192.png",
-          sizes: "192x192",
-          type: "image/png",
-        },
-        {
-          src: "/android-chrome-512x512.png",
-          sizes: "512x512",
-          type: "image/png",
-        },
-      ],
-    },
-    devOptions: {
-      enabled: true,
-      type: "module",
-    },
-  },
 
   runtimeConfig: {
-    pocketbase: {
-      url: process.env.POCKETBASE_URL || "",
-      adminEmail: process.env.PBASE_ADMIN_EMAIL || "",
-      adminPassword: process.env.PBASE_ADMIN_PASSWORD || "",
-      vapidPublicKey:
-        process.env.VAPID_PUBLIC_KEY || process.env.VAPID_PUBKEY || "",
-      vapidPrivateKey: process.env.VAPID_PRIVKEY || "",
-    },
-    mediasoup: {
-      listenIp: process.env.MEDIASOUP_LISTEN_IP || "127.0.0.1",
-      announcedAddress: process.env.MEDIASOUP_ANNOUNCED_ADDRESS || "",
-      rtcPort: Number(process.env.MEDIASOUP_RTC_PORT || 40000),
-      announcedPort: Number(
-        process.env.MEDIASOUP_ANNOUNCED_PORT ||
-          process.env.MEDIASOUP_RTC_PORT ||
-          40000,
-      ),
-      directAddress: process.env.MEDIASOUP_DIRECT_ADDRESS || "",
-      directPort: Number(
-        process.env.MEDIASOUP_DIRECT_PORT ||
-          process.env.MEDIASOUP_RTC_PORT ||
-          40000,
-      ),
-      maxClientOutgoingBitrate: Number(
-        process.env.MEDIASOUP_MAX_CLIENT_OUTGOING_BITRATE || 4500000,
-      ),
-      maxServerOutgoingBitrate: Number(
-        process.env.MEDIASOUP_MAX_SERVER_OUTGOING_BITRATE || 40000000,
-      ),
-    },
     public: {
-      authPath: process.env.AUTH_PATH,
       websocketPath: "",
-      baseApiPath: process.env.AUTH_PATH?.replace(/\/auth\/?$/, "") || "",
-      sfuPath: "",
-      apiPath: "/api",
+      baseApiPath: isDesktop ? desktopApiBasePath : "",
+
+      mediaControlUrl: process.env.MEDIA_CONTROL_URL || "",
+      apiPath:
+        isDesktop && process.env.VITE_DSPEAK_API_PATH
+          ? `${process.env.VITE_DSPEAK_API_PATH.replace(/\/$/, "")}/api`
+          : "/api",
       appVersion: packageMetadata.version,
       VAPID_PUBLIC_KEY:
         process.env.VAPID_PUBLIC_KEY || process.env.VAPID_PUBKEY,
+      supabaseUrl: process.env.SUPABASE_URL || "",
+      supabaseAnonKey: process.env.SUPABASE_ANON_KEY || "",
     },
   },
 });

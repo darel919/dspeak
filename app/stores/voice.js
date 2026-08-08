@@ -41,6 +41,7 @@ export const useVoiceStore = defineStore("voice", () => {
   const systemAudioSharing = ref(false);
   const broadcastAudioSharing = ref(false);
   const djSession = ref(null);
+  const p2pQualification = ref(null);
   const settingsStore = useSettingsStore();
   const channelsStore = useChannelsStore();
   const sharedAudioVolume = computed(() => settingsStore.sharedAudioVolume);
@@ -75,7 +76,7 @@ export const useVoiceStore = defineStore("voice", () => {
       : requested;
   });
 
-  const sfuComposable = ref(null);
+  const sfuComposable = shallowRef(null);
   const localVideoFeeds = computed(
     () => unref(sfuComposable.value?.localVideoFeeds) || EMPTY_MEDIA_FEEDS,
   );
@@ -91,6 +92,10 @@ export const useVoiceStore = defineStore("voice", () => {
   let mediaSessionError = null;
   let djStatusTimer = null;
   const soundboardActivityTimers = new Map();
+
+  function setP2pQualification(value) {
+    p2pQualification.value = value || null;
+  }
 
   function clearSoundboardActivity(userId, expectedActivity = null) {
     const normalizedUserId = String(userId);
@@ -305,6 +310,7 @@ export const useVoiceStore = defineStore("voice", () => {
       systemAudioSharing.value = false;
       broadcastAudioSharing.value = false;
       djSession.value = null;
+      p2pQualification.value = null;
       if (wasConnected) playSystemSound("voice-leave", settingsStore);
       cameraToggleGeneration += 1;
     }
@@ -422,6 +428,24 @@ export const useVoiceStore = defineStore("voice", () => {
     connectedAt.value = null;
   }
 
+  function isNativeMicrophonePermissionError(error) {
+    const details = [
+      error?.code,
+      error?.message,
+      error?.cause?.code,
+      error?.cause?.message,
+    ]
+      .filter((value) => value !== undefined && value !== null)
+      .join(" ")
+      .toLowerCase();
+    return (
+      details.includes("-220") ||
+      (details.includes("microphone") &&
+        details.includes("permission") &&
+        details.includes("denied"))
+    );
+  }
+
   async function joinVoiceChannel(channelId) {
     if (
       currentChannelId.value === channelId &&
@@ -448,8 +472,13 @@ export const useVoiceStore = defineStore("voice", () => {
       connecting.value = true;
       error.value = null;
       protocolUpdateRequired.value = false;
-      await ensureMicrophonePermission();
+      const { isTauriRuntime, useMediasoupSfu } =
+        await import("~/composables/useMediasoupSfu");
       ensureCurrentJoin();
+      if (!isTauriRuntime()) {
+        await ensureMicrophonePermission();
+        ensureCurrentJoin();
+      }
 
       if (connected.value && currentChannelId.value !== channelId) {
         await leaveVoiceChannel(false);
@@ -457,9 +486,11 @@ export const useVoiceStore = defineStore("voice", () => {
         ensureCurrentJoin();
       }
 
-      const { useMediasoupSfu } = await import("~/composables/useMediasoupSfu");
-      ensureCurrentJoin();
-      sfuComposable.value = useMediasoupSfu();
+      sfuComposable.value = useMediasoupSfu({
+        voiceStore: useVoiceStore(),
+        settingsStore,
+        channelsStore,
+      });
       session = sfuComposable.value;
       await session.prepareAudioPlayback?.();
       ensureCurrentJoin();
@@ -469,8 +500,21 @@ export const useVoiceStore = defineStore("voice", () => {
       setCurrentChannel(channelId);
       restorePersistedVoiceState();
 
-      if (micMuted.value) await session.stopAudioProduction?.();
-      else await session.startAudioProduction();
+      try {
+        if (micMuted.value) await session.stopAudioProduction?.();
+        else await session.startAudioProduction();
+      } catch (captureError) {
+        if (
+          !isTauriRuntime() ||
+          !isNativeMicrophonePermissionError(captureError)
+        )
+          throw captureError;
+        micMuted.value = true;
+        console.warn(
+          "[VoiceStore] Native microphone permission is unavailable; joining muted.",
+          captureError,
+        );
+      }
       ensureCurrentJoin();
 
       await waitForVoiceTransportReady({
@@ -483,6 +527,17 @@ export const useVoiceStore = defineStore("voice", () => {
 
       connected.value = true;
       connectedAt.value = Date.now();
+      const authenticatedUser = useAuthStore().getUserData();
+      if (authenticatedUser?.id) {
+        upsertUserProfile(authenticatedUser);
+        addConnectedUser(authenticatedUser.id, authenticatedUser);
+        updateUserVoiceState(authenticatedUser.id, {
+          muted: micMuted.value,
+          deafened: deafened.value,
+          cameraEnabled: cameraEnabled.value,
+          screenSharing: screenSharing.value,
+        });
+      }
       session.sendParticipantVoiceState?.();
       await session.ensureAudioElements?.();
       playSystemSound("voice-join", settingsStore);
@@ -496,7 +551,9 @@ export const useVoiceStore = defineStore("voice", () => {
         useFatalClientError().report(err);
         return;
       }
-      error.value = voiceJoinErrorMessage(err);
+      error.value = voiceJoinErrorMessage(err, {
+        includeDetails: import.meta.dev || isTauriRuntime(),
+      });
       if (typeof window !== "undefined") {
         const { useToast } = await import("~/composables/useToast");
         const { error: showError } = useToast();
@@ -599,7 +656,7 @@ export const useVoiceStore = defineStore("voice", () => {
     }
   }
 
-  async function toggleScreenShare() {
+  async function toggleScreenShare(captureSelection = null, options = {}) {
     if (!connected.value || !sfuComposable.value) return;
     try {
       const session = sfuComposable.value;
@@ -609,7 +666,15 @@ export const useVoiceStore = defineStore("voice", () => {
         screenSharing.value = false;
       } else {
         screenSharing.value = false;
-        const producer = await session.startVideoProduction("screen");
+        const producer = await session.startVideoProduction("screen", {
+          ...(captureSelection ? { captureSelection } : {}),
+          ...(options.explicitBrowserFallback
+            ? { explicitBrowserFallback: true }
+            : {}),
+          ...(captureSelection && captureSelection.mode !== "video"
+            ? { roomBitrateBps: effectiveSystemAudioBitrate.value * 1000 }
+            : {}),
+        });
         screenSharing.value = true;
         playSystemSound("screen-start", settingsStore);
         const handleScreenShareEnded = () => {
@@ -641,24 +706,33 @@ export const useVoiceStore = defineStore("voice", () => {
     );
   }
 
-  async function toggleSystemAudioShare() {
+  async function toggleSystemAudioShare(captureSelection = null, options = {}) {
     if (!connected.value || !sfuComposable.value) return;
     try {
       if (systemAudioSharing.value) {
         sfuComposable.value.stopSystemAudioProduction();
         systemAudioSharing.value = false;
       } else {
-        const confirmed =
-          typeof window === "undefined" ||
-          window.confirm(
-            "Share system audio only?\n\n" +
-              "Your browser will show its regular screen-sharing dialog because that is how it gives access to system audio.\n\n" +
-              "1. Choose “Entire Screen” in the browser dialog.\n" +
-              "2. Make sure “Share audio” is enabled.\n\n" +
-              "Your screen video will not be shared—only the audio will be sent.",
-          );
+        const confirmed = captureSelection
+          ? true
+          : typeof window === "undefined" ||
+            window.confirm(
+              "Share system audio only?\n\n" +
+                "Your browser will show its regular screen-sharing dialog because that is how it gives access to system audio.\n\n" +
+                "1. Choose “Entire Screen” in the browser dialog.\n" +
+                "2. Make sure “Share audio” is enabled.\n\n" +
+                "Your screen video will not be shared—only the audio will be sent.",
+            );
         if (!confirmed) return;
-        const producer = await sfuComposable.value.startSystemAudioProduction();
+        const producer = await sfuComposable.value.startSystemAudioProduction({
+          ...(captureSelection ? { captureSelection } : {}),
+          ...(options.explicitBrowserFallback
+            ? { explicitBrowserFallback: true }
+            : {}),
+          ...(captureSelection
+            ? { roomBitrateBps: effectiveSystemAudioBitrate.value * 1000 }
+            : {}),
+        });
         systemAudioSharing.value = true;
         const handleEnded = () => {
           systemAudioSharing.value = false;
@@ -841,6 +915,7 @@ export const useVoiceStore = defineStore("voice", () => {
     systemAudioSharing,
     broadcastAudioSharing,
     djSession,
+    p2pQualification,
     sharedAudioVolume,
     sharedAudioStats,
     sharedAudioAttenuation,
@@ -862,6 +937,7 @@ export const useVoiceStore = defineStore("voice", () => {
     startBroadcast,
     stopBroadcast,
     toggleBroadcast,
+    setP2pQualification,
     setSharedAudioVolume,
     setSystemAudioBitrate,
     addConnectedUser,
@@ -872,6 +948,7 @@ export const useVoiceStore = defineStore("voice", () => {
     showSoundboardActivity,
     clearSoundboardActivity,
     getConnectedUsersArray,
+    getAuthenticatedUser: () => useAuthStore().getUserData(),
     getDisplayUsersArray,
     isUserConnected,
     getUserById,

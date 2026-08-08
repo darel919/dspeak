@@ -1,11 +1,12 @@
 <template>
-  <VitePwaManifest />
+  <VitePwaManifest v-if="showPwaManifest" />
   <NuxtLayout>
     <NuxtLoadingIndicator />
     <NuxtPage />
     <GlobalVoiceStatus />
     <PwaInstallPrompt />
     <PwaUpdatePrompt />
+    <DesktopUpdatePrompt />
     <DatabaseHealthPrompt />
     <FatalErrorPrompt />
     <CookieConsent />
@@ -13,6 +14,10 @@
 </template>
 
 <script setup>
+import { hasTauriRuntimeMarker } from "./shared/desktop-capture.js";
+
+const showPwaManifest = !import.meta.client || !hasTauriRuntimeMarker();
+
 useAppearance();
 useContextualTitle();
 useCallWakeLock();

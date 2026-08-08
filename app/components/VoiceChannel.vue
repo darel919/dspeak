@@ -1,5 +1,12 @@
 <template>
   <div class="voice-channel relative flex h-full flex-col bg-base-200">
+    <DesktopCapturePicker
+      :open="capturePickerOpen"
+      :audio-only="capturePickerAudioOnly"
+      @close="closeCapturePicker"
+      @fallback="useBrowserCaptureFallback"
+      @select="selectDesktopCapture"
+    />
     <header
       class="voice-channel-header flex min-h-12 shrink-0 items-center justify-between gap-4 border-b border-white/10 bg-black px-4 text-white"
     >
@@ -38,6 +45,34 @@
         </span>
       </div>
     </header>
+
+    <div
+      v-if="
+        !voiceStore.connected ||
+        voiceStore.currentChannelId !== props.channel.id
+      "
+      class="flex min-h-0 flex-1 items-center justify-center p-6"
+    >
+      <div class="max-w-md text-center">
+        <Icon name="lucide:volume-2" class="mx-auto size-12 text-primary/70" />
+        <h2 class="mt-4 text-lg font-semibold">{{ channel.name }}</h2>
+        <p class="mt-2 text-sm text-base-content/60">
+          {{
+            voiceStore.connected
+              ? "You are connected to another voice channel."
+              : "Join this voice channel to start talking."
+          }}
+        </p>
+        <button
+          v-if="!voiceStore.connected"
+          type="button"
+          class="btn btn-primary mt-5"
+          @click="joinThisChannel"
+        >
+          Join voice channel
+        </button>
+      </div>
+    </div>
 
     <div
       v-if="remoteSystemAudioShares.length"
@@ -151,6 +186,8 @@
               v-if="tile.type === 'feed'"
               :feed-key="tile.feed.key"
               :stream="tile.feed.stream"
+              :native="tile.feed.native === true"
+              :native-frame="tile.feed.frame || null"
               :source="tile.feed.source"
               :label="tile.feed.label"
               :muted="true"
@@ -300,6 +337,23 @@
               </div>
             </div>
           </div>
+        </div>
+      </div>
+      <div
+        v-else
+        class="flex min-h-0 flex-1 items-center justify-center p-6 text-center"
+      >
+        <div class="max-w-md">
+          <Icon
+            name="lucide:users-round"
+            class="mx-auto size-14 text-primary/80"
+            aria-hidden="true"
+          />
+          <h2 class="mt-5 text-xl font-semibold">You’re the only one here</h2>
+          <p class="mt-2 text-sm text-white/60">
+            Invite someone to join {{ channel.name }} or wait for another
+            participant.
+          </p>
         </div>
       </div>
     </div>
@@ -539,7 +593,7 @@
             :data-label="
               voiceStore.screenSharing ? 'Stop sharing' : 'Share screen'
             "
-            @click="toggleScreenShare"
+            @click="requestScreenShare"
           >
             <Icon name="lucide:monitor-up" class="size-5" />
           </button>
@@ -559,7 +613,7 @@
                 ? 'Stop system audio'
                 : 'System audio'
             "
-            @click="toggleSystemAudioShare"
+            @click="requestSystemAudioShare"
           >
             <Icon name="lucide:volume-2" class="size-5" />
           </button>
@@ -672,68 +726,18 @@
         </div>
       </div>
     </footer>
-
-    <div
-      v-if="!voiceStore.connected"
-      class="voice-stage flex flex-1 flex-col items-center justify-center px-6 py-12 text-center text-white"
-    >
-      <span
-        class="mb-6 grid size-20 place-items-center bg-primary/20 text-primary"
-      >
-        <Icon name="lucide:phone-outgoing" class="size-9 text-primary" />
-      </span>
-      <p
-        class="mb-2 text-xs font-semibold uppercase tracking-widest text-white"
-      >
-        Voice channel
-      </p>
-      <h2 class="mb-3 text-2xl font-semibold text-white">
-        Join {{ props.channel.name }}
-      </h2>
-      <p class="mb-8 max-w-md text-white/65">
-        Talk, share your camera, or present your screen. Your saved microphone
-        and audio settings will be applied when you join.
-      </p>
-      <div
-        v-if="voiceStore.protocolUpdateRequired"
-        class="mb-6 max-w-md bg-warning/15 px-4 py-3 text-sm text-warning"
-        role="alert"
-      >
-        Voice signaling was updated. Refresh dSpeak before reconnecting.
-      </div>
-      <button
-        @click="
-          voiceStore.protocolUpdateRequired
-            ? reloadForMediaUpdate()
-            : joinThisChannel()
-        "
-        :disabled="voiceStore.connecting"
-        class="btn btn-primary btn-lg disabled:opacity-100"
-      >
-        <Icon name="lucide:mic" class="size-6" />
-
-        <span
-          v-if="voiceStore.connecting"
-          class="loading loading-spinner loading-sm mr-2"
-        ></span>
-        {{
-          voiceStore.protocolUpdateRequired
-            ? "Refresh to update voice"
-            : voiceStore.connecting
-              ? "Connecting..."
-              : "Connect to " + props.channel.name
-        }}
-      </button>
-    </div>
   </div>
 </template>
 
 <script setup>
+import { storeToRefs } from "pinia";
 import { useVoiceStore } from "~/stores/voice";
 import { useAuthStore } from "~/stores/auth";
 import { useSettingsStore } from "~/stores/settings";
 import { useIdentityStore } from "~/stores/identity";
 import { useChannelsStore } from "~/stores/channels";
+import { useRuntimeStore } from "~/stores/runtime";
+import { getDesktopCaptureApi } from "../shared/desktop-capture";
 
 const props = defineProps({
   channel: {
@@ -743,9 +747,16 @@ const props = defineProps({
 });
 
 const voiceStore = useVoiceStore();
+const {
+  sfuComposable: mediaSessionRef,
+  localVideoFeeds: localVideoFeedsRef,
+  remoteVideoFeeds: remoteVideoFeedsRef,
+  remoteAudioFeeds: remoteAudioFeedsRef,
+} = storeToRefs(voiceStore);
 const authStore = useAuthStore();
 const identityStore = useIdentityStore();
 const channelsStore = useChannelsStore();
+const runtimeStore = useRuntimeStore();
 const router = useRouter();
 const config = useRuntimeConfig();
 const viewMode = ref("overview");
@@ -767,33 +778,46 @@ let tileFocusTimer = null;
 const connectedUsers = computed(() => {
   return voiceStore.getDisplayUsersArray();
 });
+const mediaFeedRevision = ref(0);
+watch(
+  () => mediaSessionRef.value,
+  (session, _, onCleanup) => {
+    mediaFeedRevision.value += 1;
+    const unsubscribe = session?.on?.("state", () => {
+      mediaFeedRevision.value += 1;
+    });
+    onCleanup(() => unsubscribe?.());
+  },
+  { immediate: true },
+);
 const videoFeeds = computed(() => {
+  mediaFeedRevision.value;
   const currentUser = authStore.getUserData?.();
   const currentUserId = currentUser?.id;
-  const local = Array.from(voiceStore.localVideoFeeds).map(
-    ([source, feed]) => ({
+  const sessionLocalFeeds = unref(mediaSessionRef.value?.localVideoFeeds);
+  const localFeeds = sessionLocalFeeds || localVideoFeedsRef.value;
+  const sessionRemoteFeeds = unref(mediaSessionRef.value?.remoteVideoFeeds);
+  const remoteFeeds = sessionRemoteFeeds || remoteVideoFeedsRef.value;
+  const local = Array.from(localFeeds).map(([source, feed]) => ({
+    ...feed,
+    source,
+    key: `local-${source}`,
+    userId: currentUserId ? String(currentUserId) : "local",
+    local: true,
+    label: "You",
+    avatar: userAvatarSource(currentUser || { id: currentUserId }),
+  }));
+  const remote = Array.from(remoteFeeds).map(([producerId, feed]) => {
+    const user = voiceStore.getUserById(feed.userId) || { id: feed.userId };
+    return {
       ...feed,
-      source,
-      key: `local-${source}`,
-      userId: currentUserId ? String(currentUserId) : "local",
-      local: true,
-      label: "You",
-      avatar: userAvatarSource(currentUser || { id: currentUserId }),
-    }),
-  );
-  const remote = Array.from(voiceStore.remoteVideoFeeds).map(
-    ([producerId, feed]) => {
-      const user = voiceStore.getUserById(feed.userId) || { id: feed.userId };
-      return {
-        ...feed,
-        source: feed.source,
-        key: producerId,
-        local: false,
-        label: getUserDisplayName(user),
-        avatar: userAvatarSource(user),
-      };
-    },
-  );
+      source: feed.source,
+      key: producerId,
+      local: false,
+      label: getUserDisplayName(user),
+      avatar: userAvatarSource(user),
+    };
+  });
   return [...local, ...remote].sort(
     (a, b) => Number(b.source === "screen") - Number(a.source === "screen"),
   );
@@ -922,11 +946,11 @@ watch(
 );
 const remoteSystemAudioShares = computed(() => {
   const screenOwners = new Set(
-    Array.from(voiceStore.remoteVideoFeeds)
+    Array.from(remoteVideoFeedsRef.value)
       .filter(([, feed]) => feed.source === "screen")
       .map(([, feed]) => String(feed.userId)),
   );
-  return Array.from(voiceStore.remoteAudioFeeds)
+  return Array.from(remoteAudioFeedsRef.value)
     .filter(
       ([, feed]) =>
         feed.source === "screen-audio" &&
@@ -963,6 +987,67 @@ async function toggleScreenShare() {
     await voiceStore.toggleScreenShare();
   } catch (err) {
     console.error("[VoiceChannel] Screen share error:", err);
+  }
+}
+
+const capturePickerOpen = ref(false);
+const capturePickerAudioOnly = ref(false);
+
+async function requestScreenShare() {
+  if (voiceStore.screenSharing) {
+    await toggleScreenShare();
+    return;
+  }
+  if (runtimeStore.isTauri) {
+    const api = await getDesktopCaptureApi();
+    if (api) {
+      capturePickerAudioOnly.value = false;
+      capturePickerOpen.value = true;
+      return;
+    }
+  }
+  await toggleScreenShare();
+}
+
+async function requestSystemAudioShare() {
+  if (voiceStore.systemAudioSharing) {
+    await toggleSystemAudioShare();
+    return;
+  }
+  if (runtimeStore.isTauri) {
+    const api = await getDesktopCaptureApi();
+    if (api) {
+      capturePickerAudioOnly.value = true;
+      capturePickerOpen.value = true;
+      return;
+    }
+  }
+  await toggleSystemAudioShare();
+}
+
+function closeCapturePicker() {
+  capturePickerOpen.value = false;
+}
+
+async function selectDesktopCapture(selection) {
+  capturePickerOpen.value = false;
+  if (capturePickerAudioOnly.value) {
+    await voiceStore.toggleSystemAudioShare(selection);
+  } else {
+    await voiceStore.toggleScreenShare(selection);
+  }
+}
+
+async function useBrowserCaptureFallback() {
+  capturePickerOpen.value = false;
+  if (capturePickerAudioOnly.value) {
+    await voiceStore.toggleSystemAudioShare(null, {
+      explicitBrowserFallback: true,
+    });
+  } else {
+    await voiceStore.toggleScreenShare(null, {
+      explicitBrowserFallback: true,
+    });
   }
 }
 

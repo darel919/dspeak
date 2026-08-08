@@ -1,10 +1,9 @@
-import { usePocketBaseAdmin } from "../../utils/pocketbase";
+import { authenticateWebSocketRequest } from "../../utils/auth.js";
 import {
   addGlobalSubscriber,
   removeGlobalSubscriber,
   broadcastGlobally,
-} from "../../utils/dspeak-realtime";
-import { authenticateWebSocketRequest } from "../../utils/authentication";
+} from "../../utils/dspeak-realtime.js";
 import {
   enforceIdentifierRateLimit,
   resolveWebSocketClientIp,
@@ -18,6 +17,7 @@ import {
 } from "../../utils/user-presence-manager.js";
 
 const users = new Map();
+const userPlatforms = new Map();
 let idleCheckInterval = null;
 
 function startIdleCheck() {
@@ -26,9 +26,6 @@ function startIdleCheck() {
     checkAndTransitionIdleUsers().catch(() => {});
     for (const userId of users.values()) {
       const presence = getUserPresence(userId);
-      globalThis.dispatchEvent
-        ? globalThis.dispatchEvent(new CustomEvent("dspeak:presence-check"))
-        : null;
       broadcastGlobally({
         type: "status_updated",
         data: { userId, ...presence },
@@ -66,35 +63,21 @@ export default defineWebSocketHandler({
     users.set(peer.id, userId);
     addGlobalSubscriber(peer);
 
-    try {
-      const pb = await usePocketBaseAdmin();
-      const userRecord = await pb
-        .collection("users")
-        .getOne(userId, { fields: "id,presence_status" })
-        .catch(() => null);
+    const savedStatus = "online";
+    setUserPresence(userId, savedStatus, { isManualOverride: false });
 
-      const savedStatus = userRecord?.presence_status || "online";
-      setUserPresence(userId, savedStatus, { isManualOverride: false });
-      await pb.collection("users").update(userId, {
-        online: true,
-        presence_status: savedStatus,
-      });
+    broadcastGlobally({
+      type: "status_updated",
+      data: {
+        userId,
+        status: savedStatus,
+        updatedAt: new Date().toISOString(),
+        isManualOverride: false,
+        platform: userPlatforms.get(userId) || "web",
+      },
+    });
 
-      broadcastGlobally({
-        type: "status_updated",
-        data: {
-          userId,
-          status: savedStatus,
-          updatedAt: new Date().toISOString(),
-          isManualOverride: false,
-        },
-      });
-
-      startIdleCheck();
-    } catch (error) {
-      console.error("[Presence] failed to set user online", error);
-      peer.close(1011, "Presence unavailable");
-    }
+    startIdleCheck();
   },
 
   async message(peer, message) {
@@ -115,6 +98,11 @@ export default defineWebSocketHandler({
         return;
       }
 
+      if (data.type === "hello" && data.platform) {
+        userPlatforms.set(userId, data.platform);
+        return;
+      }
+
       if (data.type === "status") {
         const newStatus = ["online", "idle", "dnd", "offline"].includes(
           data.status,
@@ -128,12 +116,6 @@ export default defineWebSocketHandler({
           isManualOverride,
         });
 
-        const pb = await usePocketBaseAdmin();
-        await pb
-          .collection("users")
-          .update(userId, { presence_status: newStatus })
-          .catch(() => {});
-
         broadcastGlobally({
           type: "status_updated",
           data: {
@@ -141,6 +123,7 @@ export default defineWebSocketHandler({
             status: newStatus,
             updatedAt: new Date().toISOString(),
             isManualOverride,
+            platform: userPlatforms.get(userId) || "web",
           },
         });
         return;
@@ -169,15 +152,6 @@ export default defineWebSocketHandler({
 
     setUserOfflineOnDisconnect(userId);
 
-    const pb = await usePocketBaseAdmin();
-    await pb
-      .collection("users")
-      .update(userId, {
-        online: false,
-        presence_status: "offline",
-      })
-      .catch(() => {});
-
     broadcastGlobally({
       type: "status_updated",
       data: {
@@ -185,6 +159,7 @@ export default defineWebSocketHandler({
         status: "offline",
         updatedAt: new Date().toISOString(),
         isManualOverride: false,
+        platform: userPlatforms.get(userId) || "web",
       },
     });
 

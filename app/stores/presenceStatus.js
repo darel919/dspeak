@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { useRuntimeConfig } from "#app";
 import { useAuthStore } from "./auth";
+import { useRuntimeStore } from "./runtime";
 import { STORAGE_KEYS } from "~/const/storage";
 import {
   normalizePresenceStatus,
@@ -11,7 +12,20 @@ import {
 } from "~~/shared/presence-status.js";
 import { deviceHeaders } from "~/shared/device-identity";
 
+function detectPlatform(isTauri) {
+  if (typeof window === "undefined" || !isTauri) return "web";
+  if (isTauri) {
+    const ua = navigator.userAgent.toLowerCase();
+    if (ua.includes("mac")) return "macos";
+    if (ua.includes("win")) return "windows";
+    if (ua.includes("linux")) return "linux";
+    return "desktop";
+  }
+  return "web";
+}
+
 export const usePresenceStatusStore = defineStore("presenceStatus", () => {
+  const runtimeStore = useRuntimeStore();
   const presenceOverride = ref(
     loadPersisted(STORAGE_KEYS.presenceOverride, null),
   );
@@ -88,6 +102,13 @@ export const usePresenceStatusStore = defineStore("presenceStatus", () => {
           manual: Boolean(presenceOverride.value),
           idleTimeoutMs: idleTimeout.value,
           timestamp: new Date().toISOString(),
+        }),
+      );
+      const platform = detectPlatform(runtimeStore.isTauri);
+      socket.send(
+        JSON.stringify({
+          type: "hello",
+          platform,
         }),
       );
       startActivityTracking();
@@ -184,12 +205,19 @@ export const usePresenceStatusStore = defineStore("presenceStatus", () => {
     }
   }
 
-  function updateUserStatus({ userId, status, updatedAt, isManualOverride }) {
+  function updateUserStatus({
+    userId,
+    status,
+    updatedAt,
+    isManualOverride,
+    platform,
+  }) {
     if (!userId) return;
     trackedUsers.value.set(String(userId), {
       status: normalizePresenceStatus(status),
       updatedAt,
       isManualOverride: Boolean(isManualOverride),
+      platform: platform || "web",
     });
     trackedUsers.value = new Map(trackedUsers.value);
   }

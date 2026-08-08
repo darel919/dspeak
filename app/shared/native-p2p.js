@@ -498,6 +498,10 @@ export class NativeP2pMesh {
 
   async applyPeerSignal(state, signal) {
     const pc = state.pc;
+    if (signal.renegotiationNeeded === true) {
+      this.schedulePeerNegotiation(state);
+      return;
+    }
     if (signal.source) {
       const source = String(signal.source.source || "");
       const trackId = String(signal.source.trackId || "");
@@ -892,6 +896,8 @@ export class NativeP2pMesh {
       this.fail("sender-configuration-failed", error);
       throw error;
     }
+    if (state.pc.remoteDescription && state.pc.signalingState === "stable")
+      this.schedulePeerNegotiation(state);
     return sender;
   }
 
@@ -1095,6 +1101,20 @@ export class NativeP2pMesh {
         type: "ready",
         epoch: this.epoch,
         qualifiedPeerIds: qualified.map((state) => state.peerId),
+        candidateReports: qualified.map((state) => ({
+          peerId: state.peerId,
+          localCandidateType: state.selectedPair?.local?.candidateType || null,
+          remoteCandidateType:
+            state.selectedPair?.remote?.candidateType || null,
+          rttMs:
+            state.selectedPair?.currentRoundTripTime == null
+              ? null
+              : state.selectedPair.currentRoundTripTime * 1000,
+          protocol:
+            state.selectedPair?.local?.protocol ||
+            state.selectedPair?.remote?.protocol ||
+            null,
+        })),
       })
     )
       this.readyReported = false;
